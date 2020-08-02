@@ -23,15 +23,16 @@ def layer_dims_f(model, layer_names):
     return num_kernels, dim_kernels
 
 
-def loss_f(model_vgg, content_ref_fmap, style_ref_grams, num_kernels, dim_kernels, gen_im):
+def loss_f(content_ext_model, style_ext_models, content_ref_fmap, style_ref_grams, num_kernels, dim_kernels, gen_im):
 
     def _loss_f():
         gen_im_preproc = tf.keras.applications.vgg19.preprocess_input(gen_im)
 
-        content_gen_fmap = content_loss_f(model_vgg, gen_im_preproc)
+        content_gen_fmap = content_ext_model(gen_im_preproc)
         content_loss = 0.5 * tf.math.reduce_sum(tf.math.square(content_ref_fmap - content_gen_fmap))
 
-        style_gen_grams = style_loss_f(model_vgg, gen_im_preproc)
+        # style_gen_grams = style_grams_f(model_vgg, gen_im_preproc)
+        style_gen_grams = style_grams_f(style_ext_models, gen_im_preproc)
         diff_styles = [tf.math.square(a - b) for a, b in zip(style_ref_grams, style_gen_grams)]
         diff_styles_reduced = tf.TensorArray(dtype='float32', size=len(diff_styles))
         for i, diff_style in enumerate(diff_styles):
@@ -47,16 +48,7 @@ def loss_f(model_vgg, content_ref_fmap, style_ref_grams, num_kernels, dim_kernel
     return _loss_f
 
 
-def content_loss_f(model_vgg, im_preproc):
-    content_ext_model = tf.keras.Model(inputs=model_vgg.inputs,
-                                       outputs=model_vgg.get_layer(c.CONTENT_LAYER_NAME).output)
-    content_fmap = content_ext_model(im_preproc)
-    return content_fmap
-
-
-def style_loss_f(model_vgg, im_preproc):
-    style_ext_models = [tf.keras.Model(inputs=model_vgg.inputs, outputs=model_vgg.get_layer(layer).output) \
-                        for layer in c.STYLE_LAYER_NAMES]
+def style_grams_f(style_ext_models, im_preproc):
     style_ref_fmaps = [style_model(im_preproc) for style_model in style_ext_models]
 
     def _gram_matrix_f(kernels):
@@ -70,7 +62,7 @@ def style_loss_f(model_vgg, im_preproc):
     return style_ref_grams
 
 
-def load_image_tf(path):
+def load_image_tf_f(path):
     im = Image.open(path)
     im = np.array(im)
     im = np.expand_dims(im, 0)
@@ -81,7 +73,7 @@ def load_image_tf(path):
 def main():
 
     # Load content image
-    content_im = load_image_tf(c.EX_IM_PATH)
+    content_im = load_image_tf_f(c.EX_IM_PATH)
     content_im_preproc = tf.keras.applications.vgg19.preprocess_input(content_im)
 
     # VGG model
@@ -91,15 +83,21 @@ def main():
     model_vgg.trainable = False
     num_kernels, dim_kernels = layer_dims_f(model_vgg, c.STYLE_LAYER_NAMES)
 
-    # Content loss
-    content_ref_fmap = content_loss_f(model_vgg, content_im_preproc)
+    # Content loss: model to compute feature maps
+    content_ext_model = tf.keras.Model(inputs=model_vgg.inputs,
+                                       outputs=model_vgg.get_layer(c.CONTENT_LAYER_NAME).output)
 
-    # Load style image
-    style_im = load_image_tf(c.STYLE_IM_PATH)
+    # Content loss: feature maps of input (reference) image
+    content_ref_fmap = content_ext_model(content_im_preproc)
+
+    # Style loss: load style image
+    style_im = load_image_tf_f(c.STYLE_IM_PATH)
     style_im_preproc = tf.keras.applications.vgg19.preprocess_input(style_im)
 
-    # Style loss
-    style_ref_grams = style_loss_f(model_vgg, style_im_preproc)
+    # Style loss: gram matrix of input (reference) image
+    style_ext_models = [tf.keras.Model(inputs=model_vgg.inputs, outputs=model_vgg.get_layer(layer).output) \
+                        for layer in c.STYLE_LAYER_NAMES]
+    style_ref_grams = style_grams_f(style_ext_models, style_im_preproc)
 
     # Create noise image
     # gen_im = np.random.randint(0, 256, (1, width, height, channels))
@@ -113,7 +111,9 @@ def main():
     opt = tf.keras.optimizers.Adam(learning_rate=1)
 
     for epoch in range(c.EPOCHS):
-        opt.minimize(loss=loss_f(model_vgg, content_ref_fmap, style_ref_grams, num_kernels, dim_kernels, gen_im), var_list=[gen_im])
+        opt.minimize(
+            loss=loss_f(content_ext_model, style_ext_models, content_ref_fmap, style_ref_grams, num_kernels, dim_kernels, gen_im),
+            var_list=[gen_im])
         if epoch % 5 == 0:
             save_im = gen_im.numpy()[0, :, :, :]
             save_im = np.where(save_im <= 255, save_im, 255)
